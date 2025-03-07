@@ -515,6 +515,7 @@ mod tests {
 		assert!(raw_chain_spec.exists());
 		let content = fs::read_to_string(raw_chain_spec.clone()).expect("Could not read file");
 		assert!(content.contains("\"para_id\": 2001"));
+		println!("{:?}", content);
 		assert!(content.contains("\"id\": \"pop-devnet\""));
 		assert!(content.contains("\"bootNodes\": []"));
 		// Test export wasm file
