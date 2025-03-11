@@ -4,7 +4,10 @@ use std::path::Path;
 
 use crate::{
 	cli::{self, traits::*},
-	common::wallet::{prompt_to_use_wallet, request_signature},
+	common::{
+		prompt::display_message,
+		wallet::{prompt_to_use_wallet, request_signature},
+	},
 };
 use anyhow::{anyhow, Result};
 use clap::Args;
@@ -499,16 +502,6 @@ async fn submit_extrinsic_with_wallet(
 	Ok(())
 }
 
-// Displays a message to the user, with formatting based on the success status.
-fn display_message(message: &str, success: bool, cli: &mut impl Cli) -> Result<()> {
-	if success {
-		cli.outro(message)?;
-	} else {
-		cli.outro_cancel(message)?;
-	}
-	Ok(())
-}
-
 // Prompts the user for some predefined actions.
 fn prompt_predefined_actions(pallets: &[Pallet], cli: &mut impl Cli) -> Result<Option<Action>> {
 	let mut predefined_action = cli.select("What would you like to do?");
@@ -719,6 +712,7 @@ mod tests {
 				.to_vec(),
 			),
 			5, // "remark" dispatchable function
+			None,
 		)
 		.expect_input("The value for `remark` might be too large to enter. You may enter the path to a file instead.", "0x11".into())
 		.expect_confirm("Would you like to dispatch this function call with `Root` origin?", true)
@@ -768,6 +762,7 @@ mod tests {
 						.collect::<Vec<_>>(),
 				),
 				1, // "Purchase on-demand coretime" action
+				None,
 			)
 			.expect_input("Enter the value for the parameter: max_amount", "10000".into())
 			.expect_input("Enter the value for the parameter: para_id", "2000".into())
@@ -995,16 +990,6 @@ mod tests {
 		Ok(())
 	}
 
-	#[test]
-	fn display_message_works() -> Result<()> {
-		let mut cli = MockCli::new().expect_outro(&"Call completed successfully!");
-		display_message("Call completed successfully!", true, &mut cli)?;
-		cli.verify()?;
-		let mut cli = MockCli::new().expect_outro_cancel("Call failed.");
-		display_message("Call failed.", false, &mut cli)?;
-		cli.verify()
-	}
-
 	#[tokio::test]
 	async fn prompt_predefined_actions_works() -> Result<()> {
 		let client = set_up_client(POP_NETWORK_TESTNET_URL).await?;
@@ -1026,6 +1011,7 @@ mod tests {
 					.collect::<Vec<_>>(),
 			),
 			2, // "Mint an Asset" action
+			None,
 		);
 		let action = prompt_predefined_actions(&pallets, &mut cli)?;
 		assert_eq!(action, Some(Action::MintAsset));
@@ -1056,6 +1042,7 @@ mod tests {
 					.to_vec(),
 				),
 				0, // "Id" action
+				None,
 			)
 			.expect_input(
 				"Enter the value for the parameter: Id",
