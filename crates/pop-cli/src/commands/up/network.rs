@@ -48,7 +48,8 @@ pub(crate) struct ZombienetCommand {
 	/// Automatically source all needed binaries required without prompting for confirmation.
 	#[clap(short = 'y', long)]
 	skip_confirm: bool,
-	// Deprecation flag, used to specify whether the deprecation warning is shown.
+	// Deprecation flag, used to specify whether the deprecation warning is shown (will be removed
+	// in v0.8.0).
 	#[clap(skip)]
 	pub(crate) valid: bool,
 }
@@ -63,7 +64,7 @@ impl ZombienetCommand {
 		// Show warning if specified as deprecated.
 		if !self.valid {
 			log::warning(
-				"DEPRECATION: Please use `pop up network` (or simply `pop up n`) in future...",
+				"DEPRECATION: Please use `pop up network` (or simply `pop u n`) in the future...",
 			)?;
 		}
 
@@ -171,7 +172,8 @@ impl ZombienetCommand {
 							// Allow relay node time to start
 							sleep(Duration::from_secs(10)).await;
 							progress.set_message("Preparing channels...");
-							let relay_endpoint = network.relaychain().nodes()[0].client().await?;
+							let relay_endpoint =
+								network.relaychain().nodes()[0].wait_client().await?;
 							let para_ids: Vec<_> =
 								network.parachains().iter().map(|p| p.para_id()).collect();
 							tokio::spawn(async move {
