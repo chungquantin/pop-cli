@@ -215,7 +215,6 @@ impl TestOnRuntimeUpgradeCommand {
 		args.push(self.subcommand()?);
 		self.collect_arguments_after_subcommand(&after_subcommand, &mut args);
 
-		println!("display: {:?}", self.display()?);
 		run_try_runtime(
 			&binary_path,
 			TryRuntimeCliCommand::OnRuntimeUpgrade,
@@ -557,6 +556,7 @@ mod tests {
 		cmd.command.blocktime = Some(DEFAULT_BLOCK_TIME);
 		cmd.command.state = Some(State::Snap { path: Some(get_mock_snapshot()) });
 		let error = cmd.run(&mut MockCli::new()).await.unwrap_err().to_string();
+		println!("error: {}", error);
 		assert!(error.contains(
 			r#"Input("error while reading runtime file from \"./dummy-runtime-path\": Os { code: 2, kind: NotFound, message: \"No such file or directory\" }")"#,
 		));
@@ -571,6 +571,7 @@ mod tests {
 		cmd.shared_params.disable_spec_name_check = true;
 		cmd.command.disable_spec_version_check = true;
 		let error = cmd.run(&mut MockCli::new()).await.unwrap_err().to_string();
+		println!("error: {}", error);
 		assert!(error
 			.contains(r#"Input("Given runtime is not compiled with the try-runtime feature.")"#,));
 	}
@@ -585,6 +586,7 @@ mod tests {
 			..Default::default()
 		}));
 		let error = cmd.run(&mut MockCli::new()).await.unwrap_err().to_string();
+		println!("error: {}", error);
 		assert!(error.contains(
 			r#"Failed to test with try-runtime: error: invalid value 'https://example.com' for '--uri <URI>': not a valid WS(S) url: must start with 'ws://' or 'wss://'"#,
 		));
