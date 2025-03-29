@@ -5,6 +5,8 @@ use clap::Subcommand;
 use pop_common::templates::Template;
 use serde_json::{json, Value};
 
+#[cfg(feature = "parachain")]
+pub(crate) mod bench;
 pub(crate) mod build;
 pub(crate) mod call;
 pub(crate) mod clean;
@@ -23,6 +25,9 @@ pub(crate) enum Command {
 	#[clap(alias = "n")]
 	#[cfg(any(feature = "parachain", feature = "contract"))]
 	New(new::NewArgs),
+	/// Benchmark a pallet or parachain.
+	#[cfg(feature = "parachain")]
+	Bench(bench::BenchmarkArgs),
 	#[clap(alias = "b", about = about_build())]
 	#[cfg(any(feature = "parachain", feature = "contract"))]
 	Build(build::BuildArgs),
@@ -33,9 +38,9 @@ pub(crate) enum Command {
 	#[clap(alias = "u", about = about_up())]
 	#[cfg(any(feature = "parachain", feature = "contract"))]
 	Up(up::UpArgs),
-	/// Test a smart contract.
+	/// Test a Rust project.
 	#[clap(alias = "t")]
-	#[cfg(feature = "contract")]
+	#[cfg(any(feature = "parachain", feature = "contract"))]
 	Test(test::TestArgs),
 	/// Remove generated/cached artifacts.
 	#[clap(alias = "C")]
@@ -52,12 +57,12 @@ fn about_build() -> &'static str {
 	return "Build a smart contract or Rust package.";
 }
 
-/// Help message for the up command.
+/// Help message for the `up` command.
 fn about_up() -> &'static str {
 	#[cfg(all(feature = "parachain", feature = "contract"))]
-	return "Deploy a smart contract or launch a local network.";
+	return "Deploy a rollup(parachain), deploy a smart contract or launch a local network.";
 	#[cfg(all(feature = "parachain", not(feature = "contract")))]
-	return "Launch a local network.";
+	return "Deploy a rollup(parachain) or launch a local network.";
 	#[cfg(all(feature = "contract", not(feature = "parachain")))]
 	return "Deploy a smart contract.";
 }
@@ -93,6 +98,8 @@ impl Command {
 					cmd.execute().await.map(|_| json!("default"))
 				},
 			},
+			#[cfg(feature = "parachain")]
+			Self::Bench(args) => bench::Command::execute(args).await.map(|_| Value::Null),
 			#[cfg(any(feature = "parachain", feature = "contract"))]
 			Self::Build(args) => match args.command {
 				None => build::Command::execute(args).map(|t| json!(t)),
@@ -128,11 +135,13 @@ impl Command {
 					},
 				},
 			},
-			#[cfg(feature = "contract")]
 			Self::Test(args) => match args.command {
-				test::Command::Contract(cmd) => match cmd.execute().await {
-					Ok(feature) => Ok(json!(feature)),
-					Err(e) => Err(e),
+				None => test::Command::execute(args).await.map(|t| json!(t)),
+				Some(cmd) => match cmd {
+					#[cfg(feature = "contract")]
+					test::Command::Contract(cmd) => cmd.execute(&mut Cli).await.map(|t| json!(t)),
+					#[cfg(feature = "parachain")]
+					test::Command::OnRuntimeUpgrade(cmd) => cmd.execute(&mut Cli).await.map(|t| json!(t)),
 				},
 			},
 			Self::Clean(args) => match args.command {

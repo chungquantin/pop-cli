@@ -81,11 +81,11 @@ pub enum Parachain {
 		)
 	)]
 	Standard,
-	/// Parachain configured with fungible and non-fungilble asset functionalities.
+	/// Parachain configured with fungible and non-fungible asset functionalities.
 	#[strum(
 		serialize = "assets",
 		message = "Assets",
-		detailed_message = "Parachain configured with fungible and non-fungilble asset functionalities.",
+		detailed_message = "Parachain configured with fungible and non-fungible asset functionalities.",
 		props(
 			Provider = "Pop",
 			Repository = "https://github.com/r0gue-io/assets-parachain",
@@ -223,11 +223,11 @@ impl Parachain {
 	pub fn is_supported_version(&self, version: &str) -> bool {
 		// if `SupportedVersion` is None, then all versions are supported. Otherwise, ensure version
 		// is present.
-		self.supported_versions().map_or(true, |versions| versions.contains(&version))
+		self.supported_versions().is_none_or(|versions| versions.contains(&version))
 	}
 
 	pub fn is_audited(&self) -> bool {
-		self.get_str("IsAudited").map_or(false, |s| s == "true")
+		self.get_str("IsAudited") == Some("true")
 	}
 
 	pub fn license(&self) -> Option<&str> {

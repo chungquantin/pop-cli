@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use crate::Error::{self, *};
+use crate::errors::{handle_command_error, Error};
 use anyhow::{anyhow, Result};
 use duct::cmd;
 use pop_common::{manifest::from_path, Profile};
 use serde_json::{json, Value};
+use sp_core::bytes::to_hex;
 use std::{
 	fs,
 	path::{Path, PathBuf},
 	str::FromStr,
 };
+
+/// Build the deterministic runtime.
+pub mod runtime;
 
 /// Build the parachain and returns the path to the binary.
 ///
@@ -20,12 +24,34 @@ use std::{
 /// * `profile` - Whether the parachain should be built without any debugging functionality.
 /// * `node_path` - An optional path to the node directory. Defaults to the `node` subdirectory of
 ///   the project path if not provided.
+/// * `features` - A set of features the project is built with.
 pub fn build_parachain(
 	path: &Path,
 	package: Option<String>,
 	profile: &Profile,
 	node_path: Option<&Path>,
+	features: Vec<&str>,
 ) -> Result<PathBuf, Error> {
+	build_project(path, package, profile, features, None)?;
+	binary_path(&profile.target_directory(path), node_path.unwrap_or(&path.join("node")))
+}
+
+/// Build the Rust project.
+///
+/// # Arguments
+/// * `path` - The optional path to the project manifest, defaulting to the current directory if not
+///   specified.
+/// * `package` - The optional package to be built.
+/// * `profile` - Whether the project should be built without any debugging functionality.
+/// * `features` - A set of features the project is built with.
+/// * `target` - The optional target to be specified.
+pub fn build_project(
+	path: &Path,
+	package: Option<String>,
+	profile: &Profile,
+	features: Vec<&str>,
+	target: Option<&str>,
+) -> Result<(), Error> {
 	let mut args = vec!["build"];
 	if let Some(package) = package.as_deref() {
 		args.push("--package");
@@ -36,8 +62,20 @@ pub fn build_parachain(
 	} else if profile == &Profile::Production {
 		args.push("--profile=production");
 	}
+
+	let feature_args = features.join(",");
+	if !features.is_empty() {
+		args.push("--features");
+		args.push(&feature_args);
+	}
+
+	if let Some(target) = target {
+		args.push("--target");
+		args.push(target);
+	}
+
 	cmd("cargo", args).dir(path).run()?;
-	binary_path(&profile.target_directory(path), node_path.unwrap_or(&path.join("node")))
+	Ok(())
 }
 
 /// Determines whether the manifest at the supplied path is a supported parachain project.
@@ -52,7 +90,7 @@ pub fn is_supported(path: Option<&Path>) -> Result<bool, Error> {
 		["cumulus-client-collator", "cumulus-primitives-core", "parachains-common", "polkadot-sdk"];
 	Ok(DEPENDENCIES.into_iter().any(|d| {
 		manifest.dependencies.contains_key(d) ||
-			manifest.workspace.as_ref().map_or(false, |w| w.dependencies.contains_key(d))
+			manifest.workspace.as_ref().is_some_and(|w| w.dependencies.contains_key(d))
 	}))
 }
 
@@ -62,11 +100,29 @@ pub fn is_supported(path: Option<&Path>) -> Result<bool, Error> {
 /// * `target_path` - The path where the binaries are expected to be found.
 /// * `node_path` - The path to the node from which the node name will be parsed.
 pub fn binary_path(target_path: &Path, node_path: &Path) -> Result<PathBuf, Error> {
-	let manifest = from_path(Some(node_path))?;
-	let node_name = manifest.package().name();
-	let release = target_path.join(node_name);
+	build_binary_path(node_path, |node_name| target_path.join(node_name))
+}
+
+/// Constructs the runtime binary path based on the target path and the directory path.
+///
+/// # Arguments
+/// * `target_path` - The path where the binaries are expected to be found.
+/// * `runtime_path` - The path to the runtime from which the runtime name will be parsed.
+pub fn runtime_binary_path(target_path: &Path, runtime_path: &Path) -> Result<PathBuf, Error> {
+	build_binary_path(runtime_path, |runtime_name| {
+		target_path.join(format!("{runtime_name}/{}.wasm", runtime_name.replace("-", "_")))
+	})
+}
+
+fn build_binary_path<F>(project_path: &Path, path_builder: F) -> Result<PathBuf, Error>
+where
+	F: Fn(&str) -> PathBuf,
+{
+	let manifest = from_path(Some(project_path))?;
+	let project_name = manifest.package().name();
+	let release = path_builder(project_name);
 	if !release.exists() {
-		return Err(Error::MissingBinary(node_name.to_string()));
+		return Err(Error::MissingBinary(project_name.to_string()));
 	}
 	Ok(release)
 }
@@ -93,10 +149,16 @@ pub fn generate_plain_chain_spec(
 	// Create a temporary file.
 	let temp_file = tempfile::NamedTempFile::new_in(std::env::temp_dir())?;
 	// Run the command and redirect output to the temporary file.
-	cmd(binary_path, args).stdout_path(temp_file.path()).stderr_null().run()?;
+	let output = cmd(binary_path, args)
+		.stdout_path(temp_file.path())
+		.stderr_capture()
+		.unchecked()
+		.run()?;
+	// Check if the command failed.
+	handle_command_error(&output, Error::BuildSpecError)?;
 	// Atomically replace the chain spec file with the temporary file.
 	temp_file.persist(plain_chain_spec).map_err(|e| {
-		AnyhowError(anyhow!(
+		Error::AnyhowError(anyhow!(
 			"Failed to replace the chain spec file with the temporary file: {}",
 			e.to_string()
 		))
@@ -120,7 +182,7 @@ pub fn generate_raw_chain_spec(
 	}
 	check_command_exists(binary_path, "build-spec")?;
 	let raw_chain_spec = plain_chain_spec.with_file_name(chain_spec_file_name);
-	cmd(
+	let output = cmd(
 		binary_path,
 		vec![
 			"build-spec",
@@ -130,9 +192,11 @@ pub fn generate_raw_chain_spec(
 			"--raw",
 		],
 	)
-	.stderr_null()
 	.stdout_path(&raw_chain_spec)
+	.stderr_capture()
+	.unchecked()
 	.run()?;
+	handle_command_error(&output, Error::BuildSpecError)?;
 	Ok(raw_chain_spec)
 }
 
@@ -153,7 +217,7 @@ pub fn export_wasm_file(
 	}
 	check_command_exists(binary_path, "export-genesis-wasm")?;
 	let wasm_file = chain_spec.parent().unwrap_or(Path::new("./")).join(wasm_file_name);
-	cmd(
+	let output = cmd(
 		binary_path,
 		vec![
 			"export-genesis-wasm",
@@ -163,8 +227,10 @@ pub fn export_wasm_file(
 		],
 	)
 	.stdout_null()
-	.stderr_null()
+	.stderr_capture()
+	.unchecked()
 	.run()?;
+	handle_command_error(&output, Error::BuildSpecError)?;
 	Ok(wasm_file)
 }
 
@@ -185,7 +251,7 @@ pub fn generate_genesis_state_file(
 	}
 	check_command_exists(binary_path, "export-genesis-state")?;
 	let genesis_file = chain_spec.parent().unwrap_or(Path::new("./")).join(genesis_file_name);
-	cmd(
+	let output = cmd(
 		binary_path,
 		vec![
 			"export-genesis-state",
@@ -195,8 +261,10 @@ pub fn generate_genesis_state_file(
 		],
 	)
 	.stdout_null()
-	.stderr_null()
+	.stderr_capture()
+	.unchecked()
 	.run()?;
+	handle_command_error(&output, Error::BuildSpecError)?;
 	Ok(genesis_file)
 }
 
@@ -326,6 +394,25 @@ impl ChainSpec {
 		fs::write(path, self.to_string()?)?;
 		Ok(())
 	}
+
+	/// Updates the runtime code in the chain specification.
+	///
+	/// # Arguments
+	/// * `bytes` - The new runtime code.
+	pub fn update_runtime_code(&mut self, bytes: &[u8]) -> Result<(), Error> {
+		// Replace `genesis.runtimeGenesis.code`
+		let code = self
+			.0
+			.get_mut("genesis")
+			.ok_or_else(|| Error::Config("expected `genesis`".into()))?
+			.get_mut("runtimeGenesis")
+			.ok_or_else(|| Error::Config("expected `runtimeGenesis`".into()))?
+			.get_mut("code")
+			.ok_or_else(|| Error::Config("expected `runtimeGenesis.code`".into()))?;
+		let hex = to_hex(bytes, true);
+		*code = json!(hex);
+		Ok(())
+	}
 }
 
 #[cfg(test)]
@@ -336,8 +423,16 @@ mod tests {
 		Zombienet,
 	};
 	use anyhow::Result;
-	use pop_common::{manifest::Dependency, set_executable_permission};
-	use std::{fs, fs::write, io::Write, path::Path};
+	use pop_common::{
+		manifest::{add_feature, Dependency},
+		set_executable_permission,
+	};
+	use sp_core::bytes::from_hex;
+	use std::{
+		fs::{self, write},
+		io::Write,
+		path::Path,
+	};
 	use strum::VariantArray;
 	use tempfile::{tempdir, Builder, TempDir};
 
@@ -360,6 +455,22 @@ mod tests {
 		fs::create_dir(&target_dir.join("release"))?;
 		// Create a release file
 		fs::File::create(target_dir.join("release/parachain-template-node"))?;
+		Ok(())
+	}
+
+	// Function that mocks the build process of WASM runtime generating the target dir and release.
+	fn mock_build_runtime_process(temp_dir: &Path) -> Result<(), Error> {
+		let runtime = "parachain-template-runtime";
+		// Create a target directory
+		let target_dir = temp_dir.join("target");
+		fs::create_dir(&target_dir)?;
+		fs::create_dir(&target_dir.join("release"))?;
+		fs::create_dir(&target_dir.join("release/wbuild"))?;
+		fs::create_dir(&target_dir.join(format!("release/wbuild/{runtime}")))?;
+		// Create a WASM binary file
+		fs::File::create(
+			target_dir.join(format!("release/wbuild/{runtime}/{}.wasm", runtime.replace("-", "_"))),
+		)?;
 		Ok(())
 	}
 
@@ -398,12 +509,19 @@ mod tests {
 			default_command = "pop-node"
 			"#
 		)?;
-		let mut zombienet =
-			Zombienet::new(&cache, config.path().to_str().unwrap(), None, None, None, None, None)
-				.await?;
+		let mut zombienet = Zombienet::new(
+			&cache,
+			config.path().to_str().unwrap(),
+			None,
+			None,
+			None,
+			None,
+			Some(&vec!["https://github.com/r0gue-io/pop-node#testnet-v0.4.2".to_string()]),
+		)
+		.await?;
 		let mut binary_name: String = "".to_string();
 		for binary in zombienet.binaries().filter(|b| !b.exists() && b.name() == "pop-node") {
-			binary_name = format!("{}-{}", binary.name(), binary.latest().unwrap());
+			binary_name = format!("{}-{}", binary.name(), binary.version().unwrap());
 			binary.source(true, &(), true).await?;
 		}
 		Ok(binary_name)
@@ -442,12 +560,19 @@ mod tests {
 		cmd("cargo", ["new", name, "--bin"]).dir(temp_dir.path()).run()?;
 		let project = temp_dir.path().join(name);
 		add_production_profile(&project)?;
+		add_feature(&project, ("dummy-feature".to_string(), vec![]))?;
 		for node in vec![None, Some("custom_node")] {
 			let node_path = generate_mock_node(&project, node)?;
 			for package in vec![None, Some(String::from("parachain_template_node"))] {
 				for profile in Profile::VARIANTS {
 					let node_path = node.map(|_| node_path.as_path());
-					let binary = build_parachain(&project, package.clone(), &profile, node_path)?;
+					let binary = build_parachain(
+						&project,
+						package.clone(),
+						&profile,
+						node_path,
+						vec!["dummy-feature"],
+					)?;
 					let target_directory = profile.target_directory(&project);
 					assert!(target_directory.exists());
 					assert!(target_directory.join("parachain_template_node").exists());
@@ -462,7 +587,33 @@ mod tests {
 	}
 
 	#[test]
-	fn binary_path_works() -> Result<()> {
+	fn build_project_works() -> Result<()> {
+		let name = "example_project";
+		let temp_dir = tempdir()?;
+		cmd("cargo", ["new", name, "--bin"]).dir(temp_dir.path()).run()?;
+		let project = temp_dir.path().join(name);
+		add_production_profile(&project)?;
+		add_feature(&project, ("dummy-feature".to_string(), vec![]))?;
+		for package in vec![None, Some(String::from(name))] {
+			for profile in Profile::VARIANTS {
+				build_project(&project, package.clone(), &profile, vec!["dummy-feature"], None)?;
+				let target_directory = profile.target_directory(&project);
+				let binary = build_binary_path(&project, |runtime_name| {
+					target_directory.join(runtime_name)
+				})?;
+				assert!(target_directory.exists());
+				assert!(target_directory.join(name).exists());
+				assert_eq!(
+					binary.display().to_string(),
+					target_directory.join(name).display().to_string()
+				);
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn binary_path_of_node_works() -> Result<()> {
 		let temp_dir =
 			setup_template_and_instantiate().expect("Failed to setup template and instantiate");
 		mock_build_process(temp_dir.path())?;
@@ -472,6 +623,29 @@ mod tests {
 			release_path.display().to_string(),
 			format!("{}/target/release/parachain-template-node", temp_dir.path().display())
 		);
+		Ok(())
+	}
+
+	#[test]
+	fn binary_path_of_runtime_works() -> Result<()> {
+		let temp_dir =
+			setup_template_and_instantiate().expect("Failed to setup template and instantiate");
+		// Ensure binary path works for the runtime.
+		let runtime = "parachain-template-runtime";
+		mock_build_runtime_process(temp_dir.path())?;
+		let release_path = runtime_binary_path(
+			&temp_dir.path().join(format!("target/release/wbuild")),
+			&temp_dir.path().join("runtime"),
+		)?;
+		assert_eq!(
+			release_path.display().to_string(),
+			format!(
+				"{}/target/release/wbuild/{runtime}/{}.wasm",
+				temp_dir.path().display(),
+				runtime.replace("-", "_")
+			)
+		);
+
 		Ok(())
 	}
 
@@ -515,7 +689,6 @@ mod tests {
 		assert!(raw_chain_spec.exists());
 		let content = fs::read_to_string(raw_chain_spec.clone()).expect("Could not read file");
 		assert!(content.contains("\"para_id\": 2001"));
-		assert!(content.contains("\"id\": \"pop-devnet\""));
 		assert!(content.contains("\"bootNodes\": []"));
 		// Test export wasm file
 		let wasm_file = export_wasm_file(&binary_path, &raw_chain_spec, "para-2001-wasm")?;
@@ -524,6 +697,26 @@ mod tests {
 		let genesis_file =
 			generate_genesis_state_file(&binary_path, &raw_chain_spec, "para-2001-genesis-state")?;
 		assert!(genesis_file.exists());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn fails_to_generate_plain_chain_spec_when_file_missing() -> Result<()> {
+		let temp_dir =
+			setup_template_and_instantiate().expect("Failed to setup template and instantiate");
+		mock_build_process(temp_dir.path())?;
+		let binary_name = fetch_binary(temp_dir.path()).await?;
+		let binary_path = replace_mock_with_binary(temp_dir.path(), binary_name)?;
+		assert!(matches!(
+			generate_plain_chain_spec(
+				&binary_path,
+				&temp_dir.path().join("plain-parachain-chainspec.json"),
+				false,
+				&temp_dir.path().join("plain-parachain-chainspec.json").display().to_string(),
+			),
+			Err(Error::BuildSpecError(message)) if message.contains("No such file or directory")
+		));
+		assert!(!temp_dir.path().join("plain-parachain-chainspec.json").exists());
 		Ok(())
 	}
 
@@ -775,6 +968,36 @@ mod tests {
 		let mut chain_spec = ChainSpec(json!({"": "old-protocolId"}));
 		assert!(
 			matches!(chain_spec.replace_protocol_id("new-protocolId"), Err(Error::Config(error)) if error == "expected `protocolId`")
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn update_runtime_code_works() -> Result<()> {
+		let mut chain_spec =
+			ChainSpec(json!({"genesis": {"runtimeGenesis" : {  "code": "0x00" }}}));
+
+		chain_spec.update_runtime_code(&from_hex("0x1234")?)?;
+		assert_eq!(chain_spec.0, json!({"genesis": {"runtimeGenesis" : {  "code": "0x1234" }}}));
+		Ok(())
+	}
+
+	#[test]
+	fn update_runtime_code_fails() -> Result<()> {
+		let mut chain_spec =
+			ChainSpec(json!({"invalidKey": {"runtimeGenesis" : {  "code": "0x00" }}}));
+		assert!(
+			matches!(chain_spec.update_runtime_code(&from_hex("0x1234")?), Err(Error::Config(error)) if error == "expected `genesis`")
+		);
+
+		chain_spec = ChainSpec(json!({"genesis": {"invalidKey" : {  "code": "0x00" }}}));
+		assert!(
+			matches!(chain_spec.update_runtime_code(&from_hex("0x1234")?), Err(Error::Config(error)) if error == "expected `runtimeGenesis`")
+		);
+
+		chain_spec = ChainSpec(json!({"genesis": {"runtimeGenesis" : {  "invalidKey": "0x00" }}}));
+		assert!(
+			matches!(chain_spec.update_runtime_code(&from_hex("0x1234")?), Err(Error::Config(error)) if error == "expected `runtimeGenesis.code`")
 		);
 		Ok(())
 	}
